@@ -27,7 +27,7 @@ ITEMS=${ITEMS:-60} $N "$D/upstream.mjs" > "$D/up-$NAME.log" 2>&1 &
 sleep 1
 
 PORT=3000 NODE_ENV=production \
-  SECTIONS=${SECTIONS:-30} CACHE_DEPTH=${CACHE_DEPTH:-5} USE_HEADERS=${USE_HEADERS:-1} \
+  SECTIONS=${SECTIONS:-30} CACHE_DEPTH=${CACHE_DEPTH:-5} USE_HEADERS=${USE_HEADERS:-1} MODE=${MODE:-fn} \
   $N --max-old-space-size="$HEAP" "$D/.next/standalone/server.js" > "$D/srv-$NAME.log" 2>&1 &
 
 for _ in $(seq 1 60); do
@@ -38,6 +38,6 @@ if grep -q EADDRINUSE "$D/srv-$NAME.log" 2>/dev/null; then echo "!! $NAME stale 
 
 BASE=http://localhost:3000 TOTAL=$TOTAL CONC=$CONC $N "$D/load.mjs" > "$D/load-$NAME.log" 2>&1
 RESULT=$(tail -1 "$D/load-$NAME.log")
-echo "ARM $NAME  sections=${SECTIONS:-30} depth=${CACHE_DEPTH:-5} headers=${USE_HEADERS:-1} items=${ITEMS:-60} heap=${HEAP}M -> $RESULT"
+echo "ARM $NAME  sections=${SECTIONS:-30} depth=${CACHE_DEPTH:-5} headers=${USE_HEADERS:-1} mode=${MODE:-fn} items=${ITEMS:-60} heap=${HEAP}M -> $RESULT"
 
 kill_port 3000; kill_port 3101

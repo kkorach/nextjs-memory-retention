@@ -15,7 +15,7 @@ const UPSTREAM = process.env.UPSTREAM ?? 'http://127.0.0.1:3101';
 const DEPTH = Number(process.env.CACHE_DEPTH ?? 5);
 
 /** The actual work. Deliberately NOT cached, so it is identical at every depth. */
-async function doFetch(key: string): Promise<Item[]> {
+export async function doFetch(key: string): Promise<Item[]> {
   const res = await fetch(`${UPSTREAM}/?slug=${encodeURIComponent(key)}`, {
     signal: AbortSignal.timeout(3000),
   });
