@@ -1,45 +1,110 @@
-This is a [Next.js](https://nextjs.org/) template to use when reporting a [bug in the Next.js repository](https://github.com/vercel/next.js/issues) with the `app/` directory.
+# `use cache`: nested cache scopes retain memory per render until OOM
 
-## Getting Started
+Minimal reproduction for a server-side memory leak under `cacheComponents`.
 
-These are the steps you should follow when creating a bug report:
+A page that opens **nested `use cache` scopes** while also performing a **dynamic read**
+(`headers()`) retains memory on every render with a fresh cache key. The heap climbs until the
+process OOMs. Flattening the cached chain to a single level, or removing the dynamic read, both
+stop it completely.
 
-- Bug reports must be verified against the `next@canary` release. The canary version of Next.js ships daily and includes all features and fixes that have not been released to the stable version yet. Think of canary as a public beta. Some issues may already be fixed in the canary version, so please verify that your issue reproduces before opening a new issue. Issues not verified against `next@canary` will be closed after 30 days.
-- Make sure your issue is not a duplicate. Use the [GitHub issue search](https://github.com/vercel/next.js/issues) to see if there is already an open issue that matches yours. If that is the case, upvoting the other issue's first comment is desirable as we often prioritize issues based on the number of votes they receive. Note: Adding a "+1" or "same issue" comment without adding more context about the issue should be avoided. If you only find closed related issues, you can link to them using the issue number and `#`, eg.: `I found this related issue: #3000`.
-- If you think the issue is not in Next.js, the best place to ask for help is our [Discord community](https://nextjs.org/discord) or [GitHub discussions](https://github.com/vercel/next.js/discussions). Our community is welcoming and can often answer a project-related question faster than the Next.js core team.
-- Make the reproduction as minimal as possible. Try to exclude any code that does not help reproducing the issue. E.g. if you experience problems with Routing, including ESLint configurations or API routes aren't necessary. The less lines of code is to read through, the easier it is for the Next.js team to investigate. It may also help catching bugs in your codebase before publishing an issue.
-- Don't forget to create a new repository on GitHub and make it public so that anyone can view it and reproduce it.
+Related: vercel/next.js#97363. PR #97391 was tested against this and did **not** change the outcome.
 
-## How to use this template
+## Versions
 
-Execute [`create-next-app`](https://github.com/vercel/next.js/tree/canary/packages/create-next-app) with [npm](https://docs.npmjs.com/cli/init), [Yarn](https://yarnpkg.com/lang/en/docs/cli/create/), or [pnpm](https://pnpm.io) to bootstrap the example:
+- `next` 16.3.1-canary.18 (also reproduces on 16.3.0 and 16.3.1 stable)
+- `react` / `react-dom` 19.2.8
+- Node 22.22.0 (also reproduces on Node 24)
+- `output: 'standalone'`, `NODE_ENV=production`
 
-```bash
-npx create-next-app --example reproduction-template reproduction-app
-```
-
-```bash
-yarn create next-app --example reproduction-template reproduction-app
-```
+## Reproduce
 
 ```bash
-pnpm create next-app --example reproduction-template reproduction-app
+npm install
+npm run build
+
+# terminal 1 — a trivial local upstream, so the cached function performs a real fetch()
+node upstream.mjs
+
+# terminal 2 — 1 GB heap makes the OOM arrive in minutes instead of hours
+node --max-old-space-size=1024 .next/standalone/server.js
+
+# terminal 3 — 6000 requests, each with a DISTINCT slug (so each fills a new cache entry)
+node load.mjs
 ```
 
-## Learn More
+Expected: the server dies partway through.
+Actual output looks like `=> SERVER DIED after 2109 successful renders`.
 
-To learn more about Next.js, take a look at the following resources:
+## The three arms
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-- [How to Contribute to Open Source (Next.js)](https://www.youtube.com/watch?v=cuoNzXFLitc) - a video tutorial by Lee Robinson
-- [Triaging in the Next.js repository](https://github.com/vercel/next.js/blob/canary/contributing.md#triaging) - how we work on issues
-- [CodeSandbox](https://codesandbox.io/s/github/vercel/next.js/tree/canary/examples/reproduction-template) - Edit this repository on CodeSandbox
+All identical except for one environment variable on the **server** process.
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js/) - your feedback and contributions are welcome!
+| arm | env | result |
+|---|---|---|
+| baseline | *(none)* | **OOM** — died after 2109 renders |
+| flattened | `CACHE_DEPTH=1` | survived all 6000 |
+| no dynamic read | `USE_HEADERS=0` | survived all 6000 |
 
-## Deployment
+Both survivors do the same amount of work as the baseline: the local upstream logs ~30 fetches per
+render in every arm (`served=178350` after 6000 renders), so nothing is being short-circuited.
 
-If your reproduction needs to be deployed, the easiest way is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+`run-arm.sh` runs one arm end to end if you'd rather not drive it by hand:
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+```bash
+NAME=baseline ./run-arm.sh
+NAME=flat CACHE_DEPTH=1 ./run-arm.sh
+NAME=nohdr USE_HEADERS=0 ./run-arm.sh
+```
+
+### Renders-to-OOM is noisy; OOM-vs-survive is not
+
+The same baseline config has died anywhere between 199 and 2109 renders across runs. Treat the
+number as an order of magnitude only. The contrast that is stable across every run is binary: the
+baseline always dies, and both single-variable changes always survive 6000.
+
+## What each knob does
+
+All are read at runtime by the server process, so one build covers every arm.
+
+| var | default | meaning |
+|---|---|---|
+| `CACHE_DEPTH` | `5` | how many `use cache` scopes one read nests (`app/data.ts`) |
+| `USE_HEADERS` | `1` | whether each section calls `headers()` before its cached read |
+| `SECTIONS` | `30` | independent `<Suspense>` sections per page |
+| `ITEMS` | `60` | items per upstream response (`upstream.mjs`) |
+
+`SECTIONS` and `ITEMS` set how fast the heap fills, not whether it fills. At `SECTIONS=10` or
+`ITEMS=5` the leak is still present but 6000 renders is no longer enough budget to reach 1 GB, so
+those arms survive without contradicting anything.
+
+## Cost of each nesting level
+
+Measured separately by holding a `WeakRef` to a sample of the `AbortController.abort()` reason
+Errors, forcing GC, and counting survivors — 300 renders per arm, `SECTIONS` fixed at 30:
+
+| `CACHE_DEPTH` | abort Errors created / render | still reachable after GC / render |
+|---|---|---|
+| 1 | 31 | 2.0 |
+| 2 | 61 | 6.4 |
+| 3 | 91 | 14.9 |
+| 4 | 121 | 10.4 |
+| 5 | 152 | 20.7 |
+
+Each level adds Errors *and* raises the share that survives, so the cost compounds rather than
+being a fixed penalty for nesting at all. (Depth 4 is a single noisy sample; the trend across 1→5
+is the point.)
+
+Retention is permanent, not connection-scoped: with 0 established connections at rest, and again
+after 75 s idle, the retained count was byte-identical.
+
+## Notes
+
+- `output: 'standalone'` and `cacheComponents: true` are both required (see `next.config.ts`).
+- The outbound `fetch()` matters. The retained graph is rooted at a live keep-alive TCP socket
+  (`Global handles → TCP → AsyncContextFrame → …`); with no outbound fetch there is no socket to
+  anchor it. `upstream.mjs` is local so the reproduction needs no external service.
+- Distinct slugs matter. Re-requesting the same 8 slugs (`REPEAT=1 node load.mjs`) is flat over
+  6000 renders — this is per-distinct-cache-fill, not per-request.
+- Raising `cacheMaxMemorySize` makes it *worse*, not better.
+- The only mitigation found that keeps the baseline config alive for all 6000 renders is running
+  node with `--stack-trace-limit=2`. The cliff is sharp between 2 and 3.
