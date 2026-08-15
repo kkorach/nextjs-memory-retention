@@ -4,10 +4,10 @@
 #
 #   NAME=comp5 MODE=comp CACHE_DEPTH=5 RENDERS=300 ./run-ret.sh
 set -uo pipefail
-D=/tmp/rg-3761/repro
+D="$(cd "$(dirname "$0")" && pwd)"
 NAME=${NAME:?set NAME}
 RENDERS=${RENDERS:-300}
-N=/Users/kevinkorach/.nvm/versions/node/v22.22.0/bin/node
+N=${NODE_BIN:-node}
 OUT=$D/ret-$NAME.txt
 
 kill_port() {
@@ -26,7 +26,7 @@ sleep 1
 PORT=3000 NODE_ENV=production RETENTION_OUT="$OUT" \
   SECTIONS=${SECTIONS:-30} CACHE_DEPTH=${CACHE_DEPTH:-5} \
   USE_HEADERS=${USE_HEADERS:-1} MODE=${MODE:-fn} \
-  $N --expose-gc --require /tmp/rg-3761/retention-probe.cjs --max-old-space-size=4096 \
+  $N --expose-gc --require "$D/retention-probe.cjs" --max-old-space-size=4096 \
   "$D/.next/standalone/server.js" > "$D/srv-$NAME.log" 2>&1 &
 
 for _ in $(seq 1 60); do

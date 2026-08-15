@@ -7,12 +7,12 @@
 # Env: NAME (required), SECTIONS, NEST, CACHE_DEPTH, ITEMS, HEAP (MB, default 1024),
 #      TOTAL (default 6000), CONC (default 8)
 set -uo pipefail
-D=/tmp/rg-3761/repro
+D="$(cd "$(dirname "$0")" && pwd)"
 NAME=${NAME:?set NAME}
 HEAP=${HEAP:-1024}
 TOTAL=${TOTAL:-6000}
 CONC=${CONC:-8}
-N=/Users/kevinkorach/.nvm/versions/node/v22.22.0/bin/node
+N=${NODE_BIN:-node}
 
 kill_port() {
   for _ in $(seq 1 15); do
