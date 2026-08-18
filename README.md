@@ -115,3 +115,52 @@ is retracted.
 - Raising `cacheMaxMemorySize` makes it *worse*, not better.
 - Running node with `--stack-trace-limit=2` largely suppresses it. The cliff is sharp between 2
   and 3.
+
+## Isolating the mechanism without React or Next
+
+`v8-stack-retention.mjs` reproduces the underlying retention in ~40 lines with no framework involved.
+4000 payloads, each reachable only from one `setImmediate` callback's `AsyncLocalStorage` context;
+retain the abort-reason `Error`, force GC, count survivors via `WeakRef`.
+
+```bash
+for arm in noerror unread readstack limit0 one; do
+  ARM=$arm node --expose-gc v8-stack-retention.mjs
+done
+```
+
+| arm | payloads retained | stack frames kept |
+|---|---|---|
+| `noerror` — create no Error | 0 / 4000 (0%) | – |
+| `unread` — retain Error, never read `.stack` | **4000 / 4000 (100%)** | 4 |
+| `readstack` — retain Error, read `.stack` once | 0 / 4000 (0%) | 4 |
+| `limit0` — create with `stackTraceLimit = 0` | 0 / 4000 (0%) | 0 |
+| `one` — retain **one** Error per batch of 64 | **4000 / 4000 (100%)** | 4 |
+
+Identical on Node 20.11, 22.22 and 24.18.
+
+Two things this shows. Reading `.stack` releases the retention, because V8 keeps structured
+`CallSiteInfo` frames only until first access and then formats them to a string. And the `one` arm
+shows it is **cross-immediate**: 63 retained Errors kept 4000 payloads alive, so a single captured
+stack pins roughly 64 *unrelated* queued immediates through libuv's `_idlePrev`/`_idleNext` chain.
+
+## Comparing candidate fixes
+
+`apply-arm.mjs` patches one candidate into the already-built standalone output, so every arm shares a
+single build and only the vendored React Flight server differs. `run-experiment.sh` runs them
+interleaved and verifies each patch is present in the artifact before trusting a run.
+
+```bash
+npm run build
+./run-experiment.sh          # 3 interleaved repeats of stock, A, B, C, D
+```
+
+| arm | change at the abort site |
+|---|---|
+| A | retain one process-wide `Error` instead of one per render |
+| B | create it with `Error.stackTraceLimit = 0` |
+| C | create it, then `void err.stack` to format and release the frames |
+| D | use a non-`Error` reason, `{message}` |
+
+Measured at depth 5, 300 renders, medians of 3 interleaved repeats: stock **320 MB** post-GC;
+A 158, B 159, C 161, D 160. The depth-1 floor for the same build was 170 MB, so every arm removes the
+nesting penalty outright. Throughput was flat across all arms (24–26s per 300 renders).
